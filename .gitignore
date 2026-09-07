@@ -1,0 +1,24 @@
+# Build outputs
+*.exe
+*.out
+*.o
+*.obj
+*.a
+*.so
+*.dll
+
+# Runtime database files
+akshdb.data
+akshdb.data.bak
+akshdb.data.tmp
+akshdb.log
+
+# IDE/editor files
+.vscode/
+.idea/
+*.user
+*.suo
+
+# OS files
+.DS_Store
+Thumbs.db
