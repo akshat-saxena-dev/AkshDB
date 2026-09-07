@@ -13,6 +13,10 @@
 #include <cctype>
 #include <cstdio>
 #include <map>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 
 class KVStore {
@@ -23,9 +27,15 @@ private:
     std::unordered_map<std::string, std::string> transactionBackup;
 
 public:
-    void set(const std::string& key, const std::string& value) {
+    bool set(const std::string& key, const std::string& value) {
         data[key] = value;
-        logOperation("SET", key, value);
+
+        if (!logOperation("SET", key, value)) {
+            std::cerr << "Warning: failed to write SET log\n";
+            return false;
+        }
+
+        return true;
     }
 
     std::optional<std::string> get(const std::string &key) const {
@@ -46,7 +56,11 @@ public:
         }
 
         data.erase(it);
-        logOperation("DELETE", key);
+
+        if (!logOperation("DELETE", key)) {
+            std::cerr << "Warning: failed to write DELETE log\n";
+            return false;
+        }
 
         return true;
     }
@@ -103,7 +117,10 @@ public:
         data.erase(it);
         data[newKey] = value;
 
-        logOperation("RENAME", oldKey, newKey);
+        if (!logOperation("RENAME", oldKey, newKey)) {
+            std::cerr << "Warning: failed to write RENAME log\n";
+            return false;
+        }
 
         return true;
     }
@@ -230,6 +247,12 @@ public:
         transactionBackup = data;
         transactionActive = true;
 
+        if (!logOperation("BEGIN", "")) {
+            transactionBackup.clear();
+            transactionActive = false;
+            return false;
+        }
+
         return true;
     }
 
@@ -242,6 +265,10 @@ public:
         transactionBackup.clear();
         transactionActive = false;
 
+        if (!logOperation("ROLLBACK", "")) {
+            std::cerr << "Warning: failed to write ROLLBACK log\n";
+        }
+
         return true;
     }
 
@@ -253,6 +280,10 @@ public:
         transactionBackup.clear();
         transactionActive = false;
 
+        if (!logOperation("COMMIT", "")) {
+            std::cerr << "Warning: failed to write COMMIT log\n";
+        }
+
         return true;
     }
 
@@ -260,7 +291,7 @@ public:
         return transactionActive;
     }
 
-    void logOperation(
+    bool logOperation(
         const std::string& operation,
         const std::string& key,
         const std::string& value = ""
@@ -268,12 +299,37 @@ public:
         std::ofstream logFile("akshdb.log", std::ios::app);
 
         if (!logFile.is_open()) {
-            return;
+            return false;
         }
 
-        logFile << operation << '|'
-                << key << '|'
-                << value << '\n';
+        auto now = std::chrono::system_clock::now();
+        std::time_t currentTime =
+            std::chrono::system_clock::to_time_t(now);
+
+        std::tm localTime{};
+
+    #ifdef _WIN32
+        localtime_s(&localTime, &currentTime);
+    #else
+        localtime_r(&currentTime, &localTime);
+    #endif
+
+        logFile << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S")
+                << '|'
+                << operation
+                << '|'
+                << key
+                << '|'
+                << value
+                << '\n';
+
+        if (!logFile) {
+            return false;
+        }
+
+        logFile.flush();
+
+        return static_cast<bool>(logFile);
     }
 };
 

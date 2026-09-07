@@ -111,8 +111,11 @@ void processCommand(
             std::cout << "Invalid key\n";
         }
         else {
-            db.set(key, value);
-            std::cout << "OK\n";
+            if (db.set(key, value)) {
+                std::cout << "OK\n";
+            } else {
+                std::cout << "Operation completed, but logging failed\n";
+            }
         }
 
         return;
