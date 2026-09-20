@@ -28,30 +28,40 @@ private:
     mutable std::shared_mutex mutex;
 
     bool persistenceEnabled = true;
+    size_t walMaxSize = 10 * 1024 * 1024; 
 
     bool transactionActive = false;
     std::unordered_map<std::string, std::string> transactionBackup;
 
 public:
-    KVStore(bool enablePersistence = true)
-        : persistenceEnabled(enablePersistence) {}
+    KVStore(
+        bool enablePersistence = true,
+        size_t maxWALSize = 10 * 1024 * 1024
+    ) : persistenceEnabled(enablePersistence),
+        walMaxSize(maxWALSize) {}
 
     bool set(const std::string& key, const std::string& value) {
-        std::unique_lock<std::shared_mutex> lock(mutex);
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex);
 
-        if (persistenceEnabled) {
-            if (!writeWAL("SET", key, value)) {
-                std::cerr << "Error: failed to write WAL\n";
-                return false;
+            if (persistenceEnabled) {
+                if (!writeWAL("SET", key, value)) {
+                    std::cerr << "Error: failed to write WAL\n";
+                    return false;
+                }
             }
-        }
 
-        data[key] = value;
+            data[key] = value;
+        }
 
         if (persistenceEnabled) {
             if (!logOperation("SET", key, value)) {
                 std::cerr << "Warning: failed to write operation log\n";
             }
+        }
+
+        if (!checkpointWAL()) {
+            std::cerr << "Warning: WAL checkpoint failed\n";
         }
 
         return true;
@@ -69,26 +79,32 @@ public:
     }
 
     bool remove(const std::string& key) {
-        std::unique_lock<std::shared_mutex> lock(mutex);
-        auto it = data.find(key);
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex);
+            auto it = data.find(key);
 
-        if (it == data.end()) {
-            return false;
-        }
-
-        if (persistenceEnabled) {
-            if (!writeWAL("DELETE", key)) {
-                std::cerr << "Error: failed to write WAL\n";
+            if (it == data.end()) {
                 return false;
             }
-        }
 
-        data.erase(it);
+            if (persistenceEnabled) {
+                if (!writeWAL("DELETE", key)) {
+                    std::cerr << "Error: failed to write WAL\n";
+                    return false;
+                }
+            }
+
+            data.erase(it);
+        }
 
         if (persistenceEnabled) {
             if (!logOperation("DELETE", key)) {
                 std::cerr << "Warning: failed to write operation log\n";
             }
+        }
+
+        if (!checkpointWAL()) {
+            std::cerr << "Warning: WAL checkpoint failed\n";
         }
 
         return true;
@@ -136,33 +152,39 @@ public:
         const std::string& oldKey,
         const std::string& newKey
     ) {
-        std::unique_lock<std::shared_mutex> lock(mutex);
-        auto it = data.find(oldKey);
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex);
+            auto it = data.find(oldKey);
 
-        if (it == data.end()) {
-            return false;
-        }
-
-        if (data.find(newKey) != data.end()) {
-            return false;
-        }
-
-        std::string value = it->second;
-
-        if (persistenceEnabled) {
-            if (!writeWAL("RENAME", oldKey, newKey)) {
-                std::cerr << "Error: failed to write WAL\n";
+            if (it == data.end()) {
                 return false;
             }
-        }
 
-        data.erase(it);
-        data[newKey] = value;
+            if (data.find(newKey) != data.end()) {
+                return false;
+            }
+
+            std::string value = it->second;
+
+            if (persistenceEnabled) {
+                if (!writeWAL("RENAME", oldKey, newKey)) {
+                    std::cerr << "Error: failed to write WAL\n";
+                    return false;
+                }
+            }
+
+            data.erase(it);
+            data[newKey] = value;
+        }
 
         if (persistenceEnabled) {
             if (!logOperation("RENAME", oldKey, newKey)) {
                 std::cerr << "Warning: failed to write operation log\n";
             }
+        }
+
+        if (!checkpointWAL()) {
+            std::cerr << "Warning: WAL checkpoint failed\n";
         }
 
         return true;
@@ -621,6 +643,28 @@ public:
                 << replayedCount << '\n';
 
         return true;
+    }
+
+    bool shouldCheckpointWAL() const {
+        std::ifstream file("akshdb.wal", std::ios::ate | std::ios::binary);
+
+        if (!file.is_open()) {
+            return false;
+        }
+
+        return static_cast<size_t>(file.tellg()) >= walMaxSize;
+    }
+
+    bool checkpointWAL() {
+        if (!persistenceEnabled) {
+            return true;
+        }
+
+        if (!shouldCheckpointWAL()) {
+            return true;
+        }
+
+        return save("akshdb.data");
     }
 };
 

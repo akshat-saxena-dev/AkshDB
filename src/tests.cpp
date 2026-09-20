@@ -417,6 +417,46 @@ void testConcurrentRename() {
     std::cout << "Concurrent RENAME test passed\n";
 }
 
+void testWALAutoCheckpoint() {
+    KVStore db(true, 1024); // 1 KB WAL threshold
+
+    std::string value(256, 'x');
+
+    for (int i = 0; i < 10; i++) {
+        db.set("checkpoint_key_" + std::to_string(i), value);
+    }
+
+    std::ifstream wal("akshdb.wal", std::ios::ate | std::ios::binary);
+
+    if (!wal.is_open()) {
+        std::cout << "WAL auto-checkpoint test passed\n";
+        return;
+    }
+
+    size_t walSize = static_cast<size_t>(wal.tellg());
+
+    if (walSize >= 1024) {
+        std::cerr << "WAL auto-checkpoint test failed\n";
+        return;
+    }
+
+    KVStore recovered(false);
+
+    if (!recovered.load("akshdb.data")) {
+        std::cerr << "WAL auto-checkpoint recovery test failed\n";
+        return;
+    }
+
+    recovered.replayWAL();
+
+    if (recovered.size() != 10) {
+        std::cerr << "WAL auto-checkpoint recovery test failed\n";
+        return;
+    }
+
+    std::cout << "WAL auto-checkpoint test passed\n";
+}
+
 int main() {
     KVStore db;
 
@@ -535,6 +575,7 @@ int main() {
     testConcurrentReadWrite();
     testConcurrentDelete();
     testConcurrentRename();
+    testWALAutoCheckpoint();
 
     std::cout << "All tests passed\n";
 
