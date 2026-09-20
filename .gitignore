@@ -12,6 +12,11 @@ akshdb.data
 akshdb.data.bak
 akshdb.data.tmp
 akshdb.log
+akshdb.wal
+akshdb.log
+akshdb.data
+akshdb.data.bak
+akshdb.data.tmp
 
 # IDE/editor files
 .vscode/

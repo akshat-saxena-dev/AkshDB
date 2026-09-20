@@ -3,6 +3,8 @@
 #include <fstream>
 #include <iostream>
 #include <cstdio>
+#include <thread>
+#include <vector>
 
 void testSafeLoad() {
     KVStore db;
@@ -52,6 +54,367 @@ void testTransactions() {
     assert(db.get("name").value() == "Permanent");
 
     std::cout << "Transaction test passed\n";
+}
+
+void testWALSetRecovery() {
+    const std::string filename = "test_set.wal";
+
+    std::remove(filename.c_str());
+
+    {
+        std::ofstream wal(filename);
+
+        assert(wal.is_open());
+
+        wal << "SET|name|Akshat\n";
+    }
+
+    KVStore db;
+
+    assert(db.replayWAL(filename));
+
+    auto value = db.get("name");
+
+    assert(value.has_value());
+    assert(value.value() == "Akshat");
+
+    std::remove(filename.c_str());
+
+    std::cout << "WAL SET recovery test passed\n";
+}
+
+void testWALDeleteRecovery() {
+    const std::string filename = "test_delete.wal";
+
+    std::remove(filename.c_str());
+
+    {
+        std::ofstream wal(filename);
+
+        assert(wal.is_open());
+
+        wal << "SET|name|Akshat\n";
+        wal << "DELETE|name|\n";
+    }
+
+    KVStore db;
+
+    assert(db.replayWAL(filename));
+
+    assert(!db.exists("name"));
+
+    std::remove(filename.c_str());
+
+    std::cout << "WAL DELETE recovery test passed\n";
+}
+
+void testWALRenameRecovery() {
+    const std::string filename = "test_rename.wal";
+
+    std::remove(filename.c_str());
+
+    {
+        std::ofstream wal(filename);
+
+        assert(wal.is_open());
+
+        wal << "SET|name|Akshat\n";
+        wal << "RENAME|name|username\n";
+    }
+
+    KVStore db;
+
+    assert(db.replayWAL(filename));
+
+    assert(!db.exists("name"));
+
+    auto value = db.get("username");
+
+    assert(value.has_value());
+    assert(value.value() == "Akshat");
+
+    std::remove(filename.c_str());
+
+    std::cout << "WAL RENAME recovery test passed\n";
+}
+
+void testWALCommittedTransactionRecovery() {
+    const std::string filename = "test_transaction.wal";
+
+    std::remove(filename.c_str());
+
+    {
+        std::ofstream wal(filename);
+
+        assert(wal.is_open());
+
+        wal << "BEGIN||\n";
+        wal << "SET|name|Akshat\n";
+        wal << "SET|city|Delhi\n";
+        wal << "COMMIT||\n";
+    }
+
+    KVStore db;
+
+    assert(db.replayWAL(filename));
+
+    auto name = db.get("name");
+    auto city = db.get("city");
+
+    assert(name.has_value());
+    assert(city.has_value());
+
+    assert(name.value() == "Akshat");
+    assert(city.value() == "Delhi");
+
+    std::remove(filename.c_str());
+
+    std::cout << "WAL committed transaction recovery test passed\n";
+}
+
+void testWALIncompleteTransactionRecovery() {
+    const std::string filename = "test_incomplete_transaction.wal";
+
+    std::remove(filename.c_str());
+
+    {
+        std::ofstream wal(filename);
+
+        assert(wal.is_open());
+
+        wal << "BEGIN||\n";
+        wal << "SET|name|Akshat\n";
+        wal << "SET|city|Delhi\n";
+    }
+
+    KVStore db;
+
+    assert(db.replayWAL(filename));
+
+    assert(!db.exists("name"));
+    assert(!db.exists("city"));
+
+    std::remove(filename.c_str());
+
+    std::cout << "WAL incomplete transaction recovery test passed\n";
+}
+
+void testWALCheckpoint() {
+    const std::string dbFile = "test_checkpoint.data";
+    const std::string walFile = "test_checkpoint.wal";
+
+    std::remove(dbFile.c_str());
+    std::remove((dbFile + ".bak").c_str());
+    std::remove((dbFile + ".tmp").c_str());
+    std::remove(walFile.c_str());
+
+    {
+        KVStore db;
+
+        assert(db.set("name", "Akshat"));
+        assert(db.set("city", "Delhi"));
+
+        assert(db.save(dbFile));
+
+        std::ifstream wal(walFile);
+        assert(!wal.is_open() || wal.peek() == std::ifstream::traits_type::eof());
+    }
+
+    {
+        KVStore db;
+
+        assert(db.load(dbFile));
+        assert(db.replayWAL(walFile));
+
+        auto name = db.get("name");
+        auto city = db.get("city");
+
+        assert(name.has_value());
+        assert(city.has_value());
+
+        assert(name.value() == "Akshat");
+        assert(city.value() == "Delhi");
+    }
+
+    std::remove(dbFile.c_str());
+    std::remove((dbFile + ".bak").c_str());
+    std::remove((dbFile + ".tmp").c_str());
+    std::remove(walFile.c_str());
+
+    std::cout << "WAL checkpoint test passed\n";
+}
+
+void testConcurrentSet() {
+    KVStore db;
+
+    const int threadCount = 8;
+    const int operationsPerThread = 100;
+
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < threadCount; t++) {
+        threads.emplace_back([&db, t]() {
+            for (int i = 0; i < operationsPerThread; i++) {
+                std::string key =
+                    "thread_" + std::to_string(t) +
+                    "_key_" + std::to_string(i);
+
+                std::string value =
+                    "value_" + std::to_string(i);
+
+                assert(db.set(key, value));
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    assert(db.size() == threadCount * operationsPerThread);
+
+    std::cout << "Concurrent SET test passed\n";
+}
+
+void testConcurrentReadWrite() {
+    KVStore db;
+
+    const int writerCount = 4;
+    const int readerCount = 4;
+    const int operationsPerThread = 1000;
+
+    std::vector<std::thread> threads;
+
+    // Writers
+    for (int t = 0; t < writerCount; t++) {
+        threads.emplace_back([&db, t]() {
+            for (int i = 0; i < operationsPerThread; i++) {
+                std::string key =
+                    "key_" + std::to_string(t) +
+                    "_" + std::to_string(i);
+
+                db.set(key, "value");
+            }
+        });
+    }
+
+    // Readers
+    for (int t = 0; t < readerCount; t++) {
+        threads.emplace_back([&db]() {
+            for (int i = 0; i < operationsPerThread; i++) {
+                db.get("key_0_" + std::to_string(i));
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    assert(db.size() == writerCount * operationsPerThread);
+
+    std::cout << "Concurrent read/write test passed\n";
+}
+
+void testConcurrentDelete() {
+    KVStore db;
+
+    const int threadCount = 4;
+    const int operationsPerThread = 250;
+
+    for (int t = 0; t < threadCount; t++) {
+        for (int i = 0; i < operationsPerThread; i++) {
+            std::string key =
+                "key_" + std::to_string(t) +
+                "_" + std::to_string(i);
+
+            assert(db.set(key, "value"));
+        }
+    }
+
+    assert(db.size() == threadCount * operationsPerThread);
+
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < threadCount; t++) {
+        threads.emplace_back([&db, t]() {
+            for (int i = 0; i < operationsPerThread; i++) {
+                std::string key =
+                    "key_" + std::to_string(t) +
+                    "_" + std::to_string(i);
+
+                assert(db.remove(key));
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    assert(db.size() == 0);
+
+    std::cout << "Concurrent DELETE test passed\n";
+}
+
+void testConcurrentRename() {
+    KVStore db;
+
+    const int threadCount = 4;
+    const int operationsPerThread = 250;
+
+    for (int t = 0; t < threadCount; t++) {
+        for (int i = 0; i < operationsPerThread; i++) {
+            std::string key =
+                "old_" + std::to_string(t) +
+                "_" + std::to_string(i);
+
+            assert(db.set(key, "value"));
+        }
+    }
+
+    assert(db.size() == threadCount * operationsPerThread);
+
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < threadCount; t++) {
+        threads.emplace_back([&db, t]() {
+            for (int i = 0; i < operationsPerThread; i++) {
+                std::string oldKey =
+                    "old_" + std::to_string(t) +
+                    "_" + std::to_string(i);
+
+                std::string newKey =
+                    "new_" + std::to_string(t) +
+                    "_" + std::to_string(i);
+
+                assert(db.rename(oldKey, newKey));
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    assert(db.size() == threadCount * operationsPerThread);
+
+    for (int t = 0; t < threadCount; t++) {
+        for (int i = 0; i < operationsPerThread; i++) {
+            std::string oldKey =
+                "old_" + std::to_string(t) +
+                "_" + std::to_string(i);
+
+            std::string newKey =
+                "new_" + std::to_string(t) +
+                "_" + std::to_string(i);
+
+            assert(!db.exists(oldKey));
+            assert(db.exists(newKey));
+        }
+    }
+
+    std::cout << "Concurrent RENAME test passed\n";
 }
 
 int main() {
@@ -162,6 +525,16 @@ int main() {
 
     testSafeLoad();
     testTransactions();
+    testWALSetRecovery();
+    testWALDeleteRecovery();
+    testWALRenameRecovery();
+    testWALCommittedTransactionRecovery();
+    testWALIncompleteTransactionRecovery();
+    testWALCheckpoint();
+    testConcurrentSet();
+    testConcurrentReadWrite();
+    testConcurrentDelete();
+    testConcurrentRename();
 
     std::cout << "All tests passed\n";
 

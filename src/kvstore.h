@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 #include <unordered_map>
+#include <tuple>
 #include <optional>
 #include <sstream>
 #include <vector>
@@ -14,6 +15,8 @@
 #include <cstdio>
 #include <map>
 #include <chrono>
+#include <shared_mutex>
+#include <mutex>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -22,23 +25,40 @@
 class KVStore {
 private:
     std::unordered_map<std::string, std::string> data;
+    mutable std::shared_mutex mutex;
+
+    bool persistenceEnabled = true;
 
     bool transactionActive = false;
     std::unordered_map<std::string, std::string> transactionBackup;
 
 public:
+    KVStore(bool enablePersistence = true)
+        : persistenceEnabled(enablePersistence) {}
+
     bool set(const std::string& key, const std::string& value) {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+
+        if (persistenceEnabled) {
+            if (!writeWAL("SET", key, value)) {
+                std::cerr << "Error: failed to write WAL\n";
+                return false;
+            }
+        }
+
         data[key] = value;
 
-        if (!logOperation("SET", key, value)) {
-            std::cerr << "Warning: failed to write SET log\n";
-            return false;
+        if (persistenceEnabled) {
+            if (!logOperation("SET", key, value)) {
+                std::cerr << "Warning: failed to write operation log\n";
+            }
         }
 
         return true;
     }
 
     std::optional<std::string> get(const std::string &key) const {
+        std::shared_lock<std::shared_mutex> lock(mutex);
         auto it = data.find(key);
 
         if (it == data.end()) {
@@ -49,27 +69,38 @@ public:
     }
 
     bool remove(const std::string& key) {
+        std::unique_lock<std::shared_mutex> lock(mutex);
         auto it = data.find(key);
 
         if (it == data.end()) {
             return false;
         }
 
+        if (persistenceEnabled) {
+            if (!writeWAL("DELETE", key)) {
+                std::cerr << "Error: failed to write WAL\n";
+                return false;
+            }
+        }
+
         data.erase(it);
 
-        if (!logOperation("DELETE", key)) {
-            std::cerr << "Warning: failed to write DELETE log\n";
-            return false;
+        if (persistenceEnabled) {
+            if (!logOperation("DELETE", key)) {
+                std::cerr << "Warning: failed to write operation log\n";
+            }
         }
 
         return true;
     }
 
     bool exists(const std::string& key) {
+        std::shared_lock<std::shared_mutex> lock(mutex);
         return data.find(key) != data.end();
     }
 
     std::vector<std::string> keys() {
+        std::shared_lock<std::shared_mutex> lock(mutex);
         std::vector<std::string> result;
 
         for (const auto& pair : data) {
@@ -84,10 +115,13 @@ public:
     }
 
     std::size_t size() {
+        std::shared_lock<std::shared_mutex> lock(mutex);
         return data.size();
     }
 
     void stats() const {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+
         std::cout << "Total keys: " << data.size() << '\n';
 
         if (data.empty()) {
@@ -102,6 +136,7 @@ public:
         const std::string& oldKey,
         const std::string& newKey
     ) {
+        std::unique_lock<std::shared_mutex> lock(mutex);
         auto it = data.find(oldKey);
 
         if (it == data.end()) {
@@ -114,18 +149,33 @@ public:
 
         std::string value = it->second;
 
+        if (persistenceEnabled) {
+            if (!writeWAL("RENAME", oldKey, newKey)) {
+                std::cerr << "Error: failed to write WAL\n";
+                return false;
+            }
+        }
+
         data.erase(it);
         data[newKey] = value;
 
-        if (!logOperation("RENAME", oldKey, newKey)) {
-            std::cerr << "Warning: failed to write RENAME log\n";
-            return false;
+        if (persistenceEnabled) {
+            if (!logOperation("RENAME", oldKey, newKey)) {
+                std::cerr << "Warning: failed to write operation log\n";
+            }
         }
 
         return true;
     }
 
     bool save(const std::string& filename) {
+        std::unordered_map<std::string, std::string> snapshot;
+
+        {
+            std::shared_lock<std::shared_mutex> lock(mutex);
+            snapshot = data;
+        }
+
         std::string tempFilename = filename + ".tmp";
         std::string backupFilename = filename + ".bak";
 
@@ -137,7 +187,7 @@ public:
 
         int savedCount = 0;
 
-        for (const auto& pair : data) {
+        for (const auto& pair : snapshot) {
             if (pair.first.empty()) {
                 continue;
             }
@@ -168,6 +218,10 @@ public:
             std::rename(backupFilename.c_str(), filename.c_str());
             std::remove(tempFilename.c_str());
             return false;
+        }
+
+        if (!clearWAL()) {
+            std::cerr << "Warning: failed to clear WAL\n";
         }
 
         std::cout << "Saved entries: " << savedCount << '\n';
@@ -208,7 +262,10 @@ public:
             loadedCount++;
         }
 
-        data = std::move(loadedData);
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex);
+            data = loadedData;
+        }
 
         file.close();
 
@@ -240,7 +297,14 @@ public:
     }
 
     bool beginTransaction() {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+
         if (transactionActive) {
+            return false;
+        }
+
+        if (!writeWAL("BEGIN", "")) {
+            std::cerr << "Error: failed to write WAL\n";
             return false;
         }
 
@@ -248,32 +312,45 @@ public:
         transactionActive = true;
 
         if (!logOperation("BEGIN", "")) {
-            transactionBackup.clear();
-            transactionActive = false;
-            return false;
+            std::cerr << "Warning: failed to write operation log\n";
         }
 
         return true;
     }
 
     bool rollback() {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+
         if (!transactionActive) {
             return false;
         }
 
+        if (!writeWAL("ROLLBACK", "")) {
+            std::cerr << "Error: failed to write WAL\n";
+            return false;
+        }
+
         data = transactionBackup;
+
         transactionBackup.clear();
         transactionActive = false;
 
         if (!logOperation("ROLLBACK", "")) {
-            std::cerr << "Warning: failed to write ROLLBACK log\n";
+            std::cerr << "Warning: failed to write operation log\n";
         }
 
         return true;
     }
 
     bool commit() {
+        std::unique_lock<std::shared_mutex> lock(mutex);
+
         if (!transactionActive) {
+            return false;
+        }
+
+        if (!writeWAL("COMMIT", "")) {
+            std::cerr << "Error: failed to write WAL\n";
             return false;
         }
 
@@ -281,13 +358,15 @@ public:
         transactionActive = false;
 
         if (!logOperation("COMMIT", "")) {
-            std::cerr << "Warning: failed to write COMMIT log\n";
+            std::cerr << "Warning: failed to write operation log\n";
         }
 
         return true;
     }
 
     bool isTransactionActive() const {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+
         return transactionActive;
     }
 
@@ -330,6 +409,218 @@ public:
         logFile.flush();
 
         return static_cast<bool>(logFile);
+    }
+
+    bool writeWAL(
+        const std::string& operation,
+        const std::string& key,
+        const std::string& value = ""
+    ) {
+        std::ofstream wal("akshdb.wal", std::ios::app);
+
+        if (!wal.is_open()) {
+            return false;
+        }
+
+        wal << operation << '|'
+            << key << '|'
+            << value << '\n';
+
+        wal.flush();
+
+        return static_cast<bool>(wal);
+    }
+
+    bool clearWAL() {
+        std::ofstream wal("akshdb.wal", std::ios::trunc);
+
+        if (!wal.is_open()) {
+            return false;
+        }
+
+        wal.flush();
+
+        return static_cast<bool>(wal);
+    }
+
+    bool replayWAL(const std::string& filename = "akshdb.wal") {
+        std::ifstream wal(filename);
+
+        if (!wal.is_open()) {
+            return true;
+        }
+
+        std::unique_lock<std::shared_mutex> lock(mutex);
+
+        std::string line;
+
+        bool transactionActive = false;
+
+        std::vector<std::tuple<std::string, std::string, std::string>>
+            transactionOperations;
+
+        int replayedCount = 0;
+
+        while (std::getline(wal, line)) {
+            if (line.empty()) {
+                continue;
+            }
+
+            std::stringstream ss(line);
+
+            std::string operation;
+            std::string key;
+            std::string value;
+
+            std::getline(ss, operation, '|');
+            std::getline(ss, key, '|');
+            std::getline(ss, value);
+
+            if (operation.empty()) {
+                continue;
+            }
+
+            if (operation == "BEGIN") {
+                if (transactionActive) {
+                    continue;
+                }
+
+                transactionActive = true;
+                transactionOperations.clear();
+                continue;
+            }
+
+            if (operation == "COMMIT") {
+                if (!transactionActive) {
+                    continue;
+                }
+
+                for (const auto& op : transactionOperations) {
+                    const auto& opType = std::get<0>(op);
+                    const auto& opKey = std::get<1>(op);
+                    const auto& opValue = std::get<2>(op);
+
+                    if (opType == "SET") {
+                        data[opKey] = opValue;
+                        replayedCount++;
+                    }
+                    else if (opType == "DELETE") {
+                        data.erase(opKey);
+                        replayedCount++;
+                    }
+                    else if (opType == "RENAME") {
+                        auto it = data.find(opKey);
+
+                        if (it == data.end()) {
+                            continue;
+                        }
+
+                        if (data.find(opValue) != data.end()) {
+                            continue;
+                        }
+
+                        std::string storedValue = it->second;
+
+                        data.erase(it);
+                        data[opValue] = storedValue;
+
+                        replayedCount++;
+                    }
+                }
+
+                transactionOperations.clear();
+                transactionActive = false;
+
+                continue;
+            }
+
+            if (operation == "ROLLBACK") {
+                transactionOperations.clear();
+                transactionActive = false;
+                continue;
+            }
+
+            if (transactionActive) {
+                if (operation != "SET" &&
+                    operation != "DELETE" &&
+                    operation != "RENAME") {
+                    continue;
+                }
+
+                if (key.empty() || !isValidKey(key)) {
+                    continue;
+                }
+
+                if (operation == "RENAME" &&
+                    (value.empty() || !isValidKey(value))) {
+                    continue;
+                }
+
+                transactionOperations.emplace_back(
+                    operation,
+                    key,
+                    value
+                );
+
+                continue;
+            }
+
+            if (operation == "SET") {
+                if (key.empty() || !isValidKey(key)) {
+                    continue;
+                }
+
+                data[key] = value;
+                replayedCount++;
+            }
+            else if (operation == "DELETE") {
+                if (key.empty() || !isValidKey(key)) {
+                    continue;
+                }
+
+                data.erase(key);
+                replayedCount++;
+            }
+            else if (operation == "RENAME") {
+                if (key.empty() ||
+                    value.empty() ||
+                    !isValidKey(key) ||
+                    !isValidKey(value)) {
+                    continue;
+                }
+
+                auto it = data.find(key);
+
+                if (it == data.end()) {
+                    continue;
+                }
+
+                if (data.find(value) != data.end()) {
+                    continue;
+                }
+
+                std::string storedValue = it->second;
+
+                data.erase(it);
+                data[value] = storedValue;
+
+                replayedCount++;
+            }
+        }
+
+        /*
+            If the WAL ends while a transaction is active,
+            the transaction was never committed.
+            Therefore, discard its operations.
+        */
+
+        transactionOperations.clear();
+        transactionActive = false;
+
+        std::cout << "Replayed WAL entries: "
+                << replayedCount << '\n';
+
+        return true;
     }
 };
 

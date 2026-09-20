@@ -387,6 +387,10 @@ int main() {
         std::cout << "Starting with an empty database\n";
     }
 
+    if (!db.replayWAL()) {
+        std::cerr << "Warning: WAL recovery failed\n";
+    }
+
     std::string line;
     bool shouldExit = false;
 
