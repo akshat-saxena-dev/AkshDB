@@ -4,6 +4,7 @@
 #include <iostream>
 #include <cstdio>
 #include <thread>
+#include <filesystem>
 #include <vector>
 
 void testSafeLoad() {
@@ -457,6 +458,36 @@ void testWALAutoCheckpoint() {
     std::cout << "WAL auto-checkpoint test passed\n";
 }
 
+void testCustomDataDirectory()
+{
+    const std::string directory = "test_storage";
+
+    std::filesystem::remove_all(directory);
+
+    {
+        KVStore db(true, 1024, directory);
+
+        assert(db.set("name", "Akshat"));
+        assert(db.set("city", "Delhi"));
+        assert(db.save(directory + "/akshdb.data"));
+    }
+
+    assert(std::filesystem::exists(directory));
+    assert(std::filesystem::exists(directory + "/akshdb.data"));
+    assert(std::filesystem::exists(directory + "/akshdb.log"));
+    assert(std::filesystem::exists(directory + "/akshdb.wal"));
+
+    KVStore recovered(false, 1024, directory);
+
+    assert(recovered.load(directory + "/akshdb.data"));
+    assert(recovered.get("name").value() == "Akshat");
+    assert(recovered.get("city").value() == "Delhi");
+
+    std::filesystem::remove_all(directory);
+
+    std::cout << "Custom data directory test passed\n";
+}
+
 int main() {
     KVStore db;
 
@@ -576,6 +607,7 @@ int main() {
     testConcurrentDelete();
     testConcurrentRename();
     testWALAutoCheckpoint();
+    testCustomDataDirectory();
 
     std::cout << "All tests passed\n";
 

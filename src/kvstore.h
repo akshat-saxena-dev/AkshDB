@@ -7,7 +7,6 @@
 #include <unordered_map>
 #include <tuple>
 #include <optional>
-#include <sstream>
 #include <vector>
 #include <fstream>
 #include <algorithm>
@@ -20,6 +19,7 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <filesystem>
 
 
 class KVStore {
@@ -29,16 +29,33 @@ private:
 
     bool persistenceEnabled = true;
     size_t walMaxSize = 10 * 1024 * 1024; 
+    std::string dataDirectory = ".";
 
     bool transactionActive = false;
     std::unordered_map<std::string, std::string> transactionBackup;
 
+    std::string getPath(const std::string& filename) const {
+        if (dataDirectory == ".") {
+            return filename;
+        }
+
+        return dataDirectory + "/" + filename;
+    }
+
 public:
     KVStore(
         bool enablePersistence = true,
-        size_t maxWALSize = 10 * 1024 * 1024
-    ) : persistenceEnabled(enablePersistence),
-        walMaxSize(maxWALSize) {}
+        size_t maxWALSize = 10 * 1024 * 1024,
+        const std::string& directory = "."
+    )
+        : persistenceEnabled(enablePersistence),
+        walMaxSize(maxWALSize),
+        dataDirectory(directory)
+    {
+        if (persistenceEnabled && dataDirectory != ".") {
+            std::filesystem::create_directories(dataDirectory);
+        }
+    } 
 
     bool set(const std::string& key, const std::string& value) {
         {
@@ -397,7 +414,10 @@ public:
         const std::string& key,
         const std::string& value = ""
     ) {
-        std::ofstream logFile("akshdb.log", std::ios::app);
+        std::ofstream logFile(
+            getPath("akshdb.log"),
+            std::ios::app
+        );
 
         if (!logFile.is_open()) {
             return false;
@@ -438,7 +458,10 @@ public:
         const std::string& key,
         const std::string& value = ""
     ) {
-        std::ofstream wal("akshdb.wal", std::ios::app);
+        std::ofstream wal(
+            getPath("akshdb.wal"),
+            std::ios::app
+        );
 
         if (!wal.is_open()) {
             return false;
@@ -454,7 +477,10 @@ public:
     }
 
     bool clearWAL() {
-        std::ofstream wal("akshdb.wal", std::ios::trunc);
+        std::ofstream wal(
+            getPath("akshdb.wal"),
+            std::ios::trunc
+        );
 
         if (!wal.is_open()) {
             return false;
@@ -646,7 +672,10 @@ public:
     }
 
     bool shouldCheckpointWAL() const {
-        std::ifstream file("akshdb.wal", std::ios::ate | std::ios::binary);
+        std::ifstream file(
+            getPath("akshdb.wal"),
+            std::ios::ate | std::ios::binary
+        );
 
         if (!file.is_open()) {
             return false;
@@ -664,7 +693,7 @@ public:
             return true;
         }
 
-        return save("akshdb.data");
+        return save(getPath("akshdb.data"));
     }
 };
 
