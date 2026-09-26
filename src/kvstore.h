@@ -695,6 +695,114 @@ public:
 
         return save(getPath("akshdb.data"));
     }
+
+
+    bool setBatch(
+        const std::vector<std::pair<std::string, std::string>>& entries
+    ) {
+        for (const auto& [key, value] : entries) {
+            if (key.empty() || !isValidKey(key)) {
+                std::cerr << "Error: invalid key in batch\n";
+                return false;
+            }
+        }
+
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex);
+
+            for (const auto& [key, value] : entries) {
+                if (persistenceEnabled) {
+                    if (!writeWAL("SET", key, value)) {
+                        std::cerr << "Error: failed to write WAL\n";
+                        return false;
+                    }
+                }
+
+                data[key] = value;
+            }
+        }
+
+        if (persistenceEnabled) {
+            for (const auto& [key, value] : entries) {
+                if (!logOperation("SET", key, value)) {
+                    std::cerr << "Warning: failed to write operation log\n";
+                }
+            }
+        }
+
+        if (!checkpointWAL()) {
+            std::cerr << "Warning: WAL checkpoint failed\n";
+        }
+
+        return true;
+    }
+
+    std::vector<std::optional<std::string>> getBatch(
+        const std::vector<std::string>& keys
+    ) const {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+
+        std::vector<std::optional<std::string>> results;
+        results.reserve(keys.size());
+
+        for (const auto& key : keys) {
+            auto it = data.find(key);
+
+            if (it == data.end()) {
+                results.push_back(std::nullopt);
+            } else {
+                results.push_back(it->second);
+            }
+        }
+
+        return results;
+    }
+
+    bool removeBatch(const std::vector<std::string>& keys) {
+        // Validate all keys first
+        for (const auto& key : keys) {
+            if (key.empty() || !isValidKey(key)) {
+                std::cerr << "Error: invalid key in batch\n";
+                return false;
+            }
+        }
+
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex);
+
+            for (const auto& key : keys) {
+                auto it = data.find(key);
+
+                // Missing keys are simply ignored
+                if (it == data.end()) {
+                    continue;
+                }
+
+                if (persistenceEnabled) {
+                    if (!writeWAL("DELETE", key)) {
+                        std::cerr << "Error: failed to write WAL\n";
+                        return false;
+                    }
+                }
+
+                data.erase(it);
+            }
+        }
+
+        if (persistenceEnabled) {
+            for (const auto& key : keys) {
+                if (!logOperation("DELETE", key)) {
+                    std::cerr << "Warning: failed to write operation log\n";
+                }
+            }
+        }
+
+        if (!checkpointWAL()) {
+            std::cerr << "Warning: WAL checkpoint failed\n";
+        }
+
+        return true;
+    }
 };
 
 #endif

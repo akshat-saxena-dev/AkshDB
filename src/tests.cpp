@@ -488,6 +488,97 @@ void testCustomDataDirectory()
     std::cout << "Custom data directory test passed\n";
 }
 
+void testBatchSet()
+{
+    KVStore db;
+
+    std::vector<std::pair<std::string, std::string>> entries = {
+        {"name", "Akshat"},
+        {"city", "Delhi"},
+        {"language", "C++"}
+    };
+
+    assert(db.setBatch(entries));
+
+    assert(db.size() == 3);
+    assert(db.get("name").value() == "Akshat");
+    assert(db.get("city").value() == "Delhi");
+    assert(db.get("language").value() == "C++");
+
+    std::cout << "Batch SET test passed\n";
+}
+
+void testBatchSetValidation()
+{
+    KVStore db;
+
+    std::vector<std::pair<std::string, std::string>> entries = {
+        {"name", "Akshat"},
+        {"invalid|key", "value"},
+        {"city", "Delhi"}
+    };
+
+    assert(!db.setBatch(entries));
+
+    // Nothing should have been written.
+    assert(db.size() == 0);
+    assert(!db.exists("name"));
+    assert(!db.exists("city"));
+
+    std::cout << "Batch SET validation test passed\n";
+}
+
+void testBatchGet()
+{
+    KVStore db;
+
+    assert(db.set("name", "Akshat"));
+    assert(db.set("city", "Delhi"));
+
+    std::vector<std::string> keys = {
+        "name",
+        "city",
+        "missing"
+    };
+
+    auto results = db.getBatch(keys);
+
+    assert(results.size() == 3);
+
+    assert(results[0].has_value());
+    assert(results[0].value() == "Akshat");
+
+    assert(results[1].has_value());
+    assert(results[1].value() == "Delhi");
+
+    assert(!results[2].has_value());
+
+    std::cout << "Batch GET test passed\n";
+}
+
+void testBatchDelete()
+{
+    KVStore db;
+
+    assert(db.setBatch({
+        {"name", "Akshat"},
+        {"city", "Delhi"},
+        {"language", "C++"}
+    }));
+
+    assert(db.removeBatch({
+        "name",
+        "city",
+        "missing"
+    }));
+
+    assert(!db.exists("name"));
+    assert(!db.exists("city"));
+    assert(db.exists("language"));
+
+    std::cout << "Batch DELETE test passed\n";
+}
+
 int main() {
     KVStore db;
 
@@ -608,6 +699,10 @@ int main() {
     testConcurrentRename();
     testWALAutoCheckpoint();
     testCustomDataDirectory();
+    testBatchSet();
+    testBatchSetValidation();
+    testBatchGet();
+    testBatchDelete();
 
     std::cout << "All tests passed\n";
 
